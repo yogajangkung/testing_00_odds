@@ -133,6 +133,12 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
         await page.goto(link, wait_until='domcontentloaded', timeout=50_000)
         await asyncio.sleep(3)
 
+        try:
+            # Gunakan selector yang fleksibel
+            await page.click("button:has-text('I Accept')", timeout=5000)
+        except:
+            pass # Abaikan jika tidak ada
+        
         # # ── Klik more-button ──
         # if not await click_with_retry(page, "[data-testid='more-button']", "More button", thread_id):
         #     return {"link": link, "match": "SKIP - more_btn not found", "odds_dict": {}}
