@@ -7,8 +7,8 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # ─────────────────────────────────────────────
 # Config — sesuaikan path
 # ─────────────────────────────────────────────
-INPUT_CSV   = '/home/agoy/testing_00_odds/links_copy.csv'
-OUTPUT_CSV  = '/home/agoy/testing_00_odds/odds_output.csv'
+INPUT_CSV   = 'links copy.csv'
+OUTPUT_CSV  = 'odds_output.csv'
 MAX_WORKERS = 3       # mulai dari 3, naikkan ke 5 kalau RAM cukup
 NAV_TIMEOUT = 30_000  # 30 detik per elemen
 
