@@ -8,9 +8,9 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # ─────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────
-INPUT_CSV  = '/home/agoy/Documents/Coding/oddsportal_python/links_copy.csv'
-OUTPUT_CSV = '/home/agoy/Documents/Coding/oddsportal_python/odds_output.csv'
-MAX_WORKERS = 20        # jumlah tab paralel
+INPUT_CSV  = 'links copy.csv'
+OUTPUT_CSV = 'odds_output.csv'
+MAX_WORKERS = 5        # jumlah tab paralel
 NAV_TIMEOUT = 30_000   # ms — timeout untuk wait/click
 
 # ─────────────────────────────────────────────
