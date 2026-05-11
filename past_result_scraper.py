@@ -127,7 +127,11 @@ async def click_with_retry(page, selector: str, label: str, thread_id: int, max_
 # ─────────────────────────────────────────────
 async def scrape_link(context, link: str, thread_id: int) -> dict:
     page = await context.new_page()
-
+    # Blokir request yang tidak perlu
+    await page.route("**/*.{png,jpg,jpeg,svg,css,woff,woff2,ttf,otf}", lambda route: route.abort())
+    
+    # Blokir juga domain tracker/analytics jika perlu
+    await page.route(re.compile(r"google-analytics|doubleclick|facebook"), lambda route: route.abort())
     try:
         print(f"[Thread-{thread_id}] Membuka: {link}")
         await page.goto(link, wait_until='domcontentloaded', timeout=50_000)
