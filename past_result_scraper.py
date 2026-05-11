@@ -5,20 +5,22 @@ import asyncio
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 # ─────────────────────────────────────────────
-# Config
+# Config — sesuaikan path
 # ─────────────────────────────────────────────
-INPUT_CSV   = '/home/agoy/Documents/Coding/oddsportal_python/links_copy.csv'
-OUTPUT_CSV  = '/home/agoy/Documents/Coding/oddsportal_python/odds_output.csv'
-MAX_WORKERS = 5          # turunkan dulu di VPS, naikkan kalau stabil
-NAV_TIMEOUT = 30_000     # 30 detik — lebih realistis untuk VPS
+INPUT_CSV   = '/home/agoy/testing_00_odds/links_copy.csv'
+OUTPUT_CSV  = '/home/agoy/testing_00_odds/odds_output.csv'
+MAX_WORKERS = 3       # mulai dari 3, naikkan ke 5 kalau RAM cukup
+NAV_TIMEOUT = 30_000  # 30 detik per elemen
 
 # ─────────────────────────────────────────────
-# State CSV (shared antar thread)
+# State CSV (shared antar thread, thread-safe)
 # ─────────────────────────────────────────────
 csv_lock        = asyncio.Lock()
-known_columns   = ["link", "match", "home_score", "away_score",
-                   "home_avg_scored", "home_avg_conceded",
-                   "away_avg_scored", "away_avg_conceded"]
+known_columns   = [
+    "link", "match", "home_score", "away_score",
+    "home_avg_scored", "home_avg_conceded",
+    "away_avg_scored", "away_avg_conceded",
+]
 csv_initialized = False
 
 async def append_result_to_csv(output_path: str, result: dict) -> None:
@@ -34,36 +36,41 @@ async def append_result_to_csv(output_path: str, result: dict) -> None:
             csv_initialized = True
         with open(output_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=known_columns, extrasaction='ignore')
-            row = {"link": result["link"], "match": result["match"],
-                   "home_score": result.get("home_score", ""),
-                   "away_score": result.get("away_score", "")}
+            row = {
+                "link":       result.get("link", ""),
+                "match":      result.get("match", ""),
+                "home_score": result.get("home_score", ""),
+                "away_score": result.get("away_score", ""),
+            }
             row.update(result.get("odds_dict", {}))
             writer.writerow(row)
-        print(f"[CSV] Disimpan: {result['match']}")
+        print(f"[CSV] Disimpan: {result.get('match', '?')}")
 
 # ─────────────────────────────────────────────
 # Baca links dari CSV
 # ─────────────────────────────────────────────
-def read_links(csv_path: str) -> list[str]:
+def read_links(csv_path: str) -> list:
     links = []
     with open(csv_path, 'r') as f:
         for row in csv.reader(f):
-            if row:
-                links.append(row[0])
+            if row and row[0].strip():
+                links.append(row[0].strip())
     return links
 
 # ─────────────────────────────────────────────
-# Parse H2H → team URLs
+# Parse H2H URL → dua URL team
 # ─────────────────────────────────────────────
-def parse_h2h_to_team_urls(h2h_url: str) -> tuple[str, str]:
+def parse_h2h_to_team_urls(h2h_url: str):
     pattern = r'oddsportal\.com/(\w+)/h2h/(.+?)-([A-Za-z0-9]+)/(.+?)-([A-Za-z0-9]+)/'
     m = re.search(pattern, h2h_url)
     if not m:
         return None, None
     sport = m.group(1)
     base  = "https://www.oddsportal.com"
-    return (f"{base}/{sport}/team/{m.group(2)}/{m.group(3)}/",
-            f"{base}/{sport}/team/{m.group(4)}/{m.group(5)}/")
+    return (
+        f"{base}/{sport}/team/{m.group(2)}/{m.group(3)}/",
+        f"{base}/{sport}/team/{m.group(4)}/{m.group(5)}/",
+    )
 
 # ─────────────────────────────────────────────
 # Helper: klik dengan retry
@@ -85,7 +92,7 @@ async def click_with_retry(page, selector: str, label: str, thread_id: int, max_
     return False
 
 # ─────────────────────────────────────────────
-# Ekstrak skor dari sibling div
+# Ekstrak skor dari sibling div (via JS)
 # ─────────────────────────────────────────────
 async def _extract_score(page, testid: str) -> str:
     score = await page.evaluate("""
@@ -108,6 +115,7 @@ async def _extract_score(page, testid: str) -> str:
 async def scrape_link(context, link: str, thread_id: int) -> dict:
     page = await context.new_page()
 
+    # Blokir resource tidak perlu
     async def block_resources(route, request):
         if request.resource_type in {"image", "media", "font", "stylesheet"}:
             await route.abort()
@@ -116,6 +124,7 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
     await page.route("**/*", block_resources)
 
     def skip(reason):
+        print(f"[Thread-{thread_id}] {reason}")
         return {"link": link, "match": reason, "home_score": "", "away_score": "", "odds_dict": {}}
 
     try:
@@ -123,15 +132,19 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
         await page.goto(link, wait_until='domcontentloaded', timeout=50_000)
         await asyncio.sleep(2)
 
+        # ── Tab CS ──
         if not await click_with_retry(page, "text=CS", "Tab CS", thread_id):
             return skip("SKIP - CS not found")
 
+        # ── Klik 0:0 ──
         try:
             await page.wait_for_selector("p:text-is('0:0')", timeout=NAV_TIMEOUT)
             await page.click("p:text-is('0:0')")
+            print(f"[Thread-{thread_id}] 0:0 diklik")
         except PlaywrightTimeout:
             return skip("SKIP - 0:0 not found")
 
+        # ── Tunggu odds expanded ──
         try:
             await page.wait_for_selector("[data-testid='over-under-expanded-row']", timeout=NAV_TIMEOUT)
         except PlaywrightTimeout:
@@ -151,7 +164,7 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
         away_score = await _extract_score(page, "game-guest")
         print(f"[Thread-{thread_id}] {match_name} | Skor: {home_score}-{away_score}")
 
-        # ── Odds bookmaker ──
+        # ── Odds per bookmaker ──
         odds_dict = {}
         rows  = page.locator("[data-testid='over-under-expanded-row']")
         count = await rows.count()
@@ -166,27 +179,32 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
                 bm  = (await bm_el.inner_text()).strip()
                 odd = (await odds_el.inner_text()).strip()
                 odds_dict[bm] = odd
+        print(f"[Thread-{thread_id}] Bookmaker: {len(odds_dict)}")
 
-        # ── Team stats (avg scored/conceded) ──
-        link_h2h = parse_h2h_to_team_urls(link)
+        # ── Team stats: avg scored/conceded ──
+        home_url, away_url = parse_h2h_to_team_urls(link)
         home_scored = home_conceded = away_scored = away_conceded = "N/A"
 
-        if link_h2h[0] and link_h2h[1]:
-            for idx, (url, prefix) in enumerate([(link_h2h[0], "home"), (link_h2h[1], "away")]):
-                try:
-                    print(f"[Thread-{thread_id}] Team page {prefix}: {url}")
-                    await page.goto(url, wait_until='domcontentloaded', timeout=50_000)
-                    await page.wait_for_selector("span.text-base.font-bold", timeout=15_000)
-                    await asyncio.sleep(2)
-                    spans = page.locator("span.text-base.font-bold")
-                    sc  = (await spans.nth(3).inner_text()).strip() if await spans.count() > 3 else "N/A"
-                    con = (await spans.nth(4).inner_text()).strip() if await spans.count() > 4 else "N/A"
-                    if prefix == "home":
-                        home_scored, home_conceded = sc, con
-                    else:
-                        away_scored, away_conceded = sc, con
-                except PlaywrightTimeout:
-                    print(f"[Thread-{thread_id}] Team page {prefix} timeout")
+        for url, prefix in [(home_url, "home"), (away_url, "away")]:
+            if not url:
+                continue
+            try:
+                print(f"[Thread-{thread_id}] Team {prefix}: {url}")
+                await page.goto(url, wait_until='domcontentloaded', timeout=50_000)
+                await page.wait_for_selector("span.text-base.font-bold", timeout=15_000)
+                await asyncio.sleep(2)
+                spans = page.locator("span.text-base.font-bold")
+                sc  = (await spans.nth(3).inner_text()).strip() if await spans.count() > 3 else "N/A"
+                con = (await spans.nth(4).inner_text()).strip() if await spans.count() > 4 else "N/A"
+                if prefix == "home":
+                    home_scored, home_conceded = sc, con
+                else:
+                    away_scored, away_conceded = sc, con
+                print(f"[Thread-{thread_id}] {prefix} scored={sc} conceded={con}")
+            except PlaywrightTimeout:
+                print(f"[Thread-{thread_id}] Team {prefix} timeout → N/A")
+            except Exception as e:
+                print(f"[Thread-{thread_id}] Team {prefix} error: {e}")
 
         odds_dict.update({
             "home_avg_scored":   home_scored,
@@ -195,13 +213,16 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
             "away_avg_conceded": away_conceded,
         })
 
-        print(f"[Thread-{thread_id}] Selesai: {len(odds_dict)} kolom")
-        return {"link": link, "match": match_name,
-                "home_score": home_score, "away_score": away_score,
-                "odds_dict": odds_dict}
+        return {
+            "link":       link,
+            "match":      match_name,
+            "home_score": home_score,
+            "away_score": away_score,
+            "odds_dict":  odds_dict,
+        }
 
     except Exception as e:
-        print(f"[Thread-{thread_id}] Error: {e}")
+        print(f"[Thread-{thread_id}] Error tidak terduga: {e}")
         return {"link": link, "match": "ERROR", "home_score": "", "away_score": "", "odds_dict": {}}
     finally:
         await page.close()
@@ -210,14 +231,24 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
 # Main
 # ─────────────────────────────────────────────
 async def main():
+    if not os.path.exists(INPUT_CSV):
+        print(f"ERROR: File input tidak ditemukan: {INPUT_CSV}")
+        return
+
     links = read_links(INPUT_CSV)
+    if not links:
+        print("ERROR: Tidak ada link di CSV")
+        return
+
     print(f"Total link: {len(links)}")
+    print(f"Output: {OUTPUT_CSV}")
+    print(f"Workers: {MAX_WORKERS}")
+    print("Memulai scraping...")
 
     all_results = []
     semaphore   = asyncio.Semaphore(MAX_WORKERS)
 
     async with async_playwright() as pw:
-        # ← Pakai chromium bawaan Playwright, bukan channel="chrome"
         browser = await pw.chromium.launch(
             headless=True,
             args=[
@@ -225,40 +256,42 @@ async def main():
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--single-process',          # penting untuk VPS RAM terbatas
-                '--no-zygote',               # penting untuk VPS
                 '--blink-settings=imagesEnabled=false',
             ]
         )
-    
-    async def run_one(link: str, thread_id: int):
-        async with semaphore:
-            try:
-                context = await browser.new_context(
-                    java_script_enabled=True,
-                    bypass_csp=True,
-                    user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-                    viewport={"width": 390, "height": 844},
-                    device_scale_factor=2,
-                    is_mobile=True,
-                    has_touch=True,
-                    extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
-                )
-                await context.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                """)
-                try:
-                    result = await scrape_link(context, link, thread_id)
-                    all_results.append(result)
-                    await append_result_to_csv(OUTPUT_CSV, result)
-                    print(f"[Selesai] Thread-{thread_id}: {result['match']}")
-                finally:
-                    await context.close()
-            except Exception as e:
-                print(f"[Thread-{thread_id}] Context error: {e} → skip link: {link}")
+        print(f"Browser launched: Chromium headless")
 
-        tasks = [asyncio.create_task(run_one(link, i + 1)) for i, link in enumerate(links)]
+        async def run_one(link: str, thread_id: int):
+            async with semaphore:
+                try:
+                    context = await browser.new_context(
+                        java_script_enabled=True,
+                        bypass_csp=True,
+                        user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                        viewport={"width": 390, "height": 844},
+                        device_scale_factor=2,
+                        is_mobile=True,
+                        has_touch=True,
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
+                    )
+                    await context.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                    """)
+                    try:
+                        result = await scrape_link(context, link, thread_id)
+                        all_results.append(result)
+                        await append_result_to_csv(OUTPUT_CSV, result)
+                        print(f"[Selesai] Thread-{thread_id}: {result['match']}")
+                    finally:
+                        await context.close()
+                except Exception as e:
+                    print(f"[Thread-{thread_id}] Context error: {e} → skip: {link}")
+
+        tasks = [
+            asyncio.create_task(run_one(link, i + 1))
+            for i, link in enumerate(links)
+        ]
 
         try:
             await asyncio.gather(*tasks)
@@ -268,7 +301,7 @@ async def main():
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            print(f"\nTotal tersimpan: {len(all_results)}")
+            print(f"\nTotal selesai: {len(all_results)} dari {len(links)} link")
             await browser.close()
 
 if __name__ == "__main__":
