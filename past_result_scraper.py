@@ -132,9 +132,17 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
         await page.goto(link, wait_until='domcontentloaded', timeout=50_000)
         await asyncio.sleep(2)
 
-        # ── Tab CS ──
+        # ── Klik tab CS ──
         if not await click_with_retry(page, "text=CS", "Tab CS", thread_id):
             return skip("SKIP - CS not found")
+        
+        # ── DEBUG: ambil screenshot dan HTML ──
+        await asyncio.sleep(3)
+        await page.screenshot(path=f"/home/agoy/testing_00_odds/debug_thread{thread_id}.png")
+        with open(f"/home/agoy/testing_00_odds/debug_thread{thread_id}.html", "w") as f:
+            f.write(await page.content())
+        print(f"[Thread-{thread_id}] Screenshot dan HTML disimpan")
+        return skip("DEBUG MODE")  # ← hapus baris ini setelah debug selesai
 
         # ── Klik 0:0 ──
         try:
