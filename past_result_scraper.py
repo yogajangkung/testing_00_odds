@@ -7,57 +7,38 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # ─────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────
-INPUT_CSV  = '/home/agoy/Documents/Coding/oddsportal_python/links_copy.csv'
-OUTPUT_CSV = '/home/agoy/Documents/Coding/oddsportal_python/odds_output.csv'
-MAX_WORKERS = 10        # jumlah tab paralel
-NAV_TIMEOUT = 300_000   # ms — timeout untuk wait/click
-
-# ─────────────────────────────────────────────
-# Tulis satu hasil ke CSV (append mode)
-# ─────────────────────────────────────────────
-def write_row_to_csv(output_path: str, result: dict, all_fieldnames: list) -> None:
-    file_exists = os.path.exists(output_path)
-    with open(output_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=all_fieldnames, extrasaction='ignore')
-        if not file_exists:
-            writer.writeheader()
-        row = {"link": result["link"], "match": result["match"]}
-        for bm in all_fieldnames:
-            row[bm] = result["odds_dict"].get(bm, "")
-        writer.writerow(row)
+INPUT_CSV   = '/home/agoy/Documents/Coding/oddsportal_python/links_copy.csv'
+OUTPUT_CSV  = '/home/agoy/Documents/Coding/oddsportal_python/odds_output.csv'
+MAX_WORKERS = 5          # turunkan dulu di VPS, naikkan kalau stabil
+NAV_TIMEOUT = 30_000     # 30 detik — lebih realistis untuk VPS
 
 # ─────────────────────────────────────────────
 # State CSV (shared antar thread)
 # ─────────────────────────────────────────────
-csv_lock       = asyncio.Lock()
-known_columns  = ["link", "match", "home_avg_scored", "home_avg_conceded",
-                  "away_avg_scored", "away_avg_conceded"]
+csv_lock        = asyncio.Lock()
+known_columns   = ["link", "match", "home_score", "away_score",
+                   "home_avg_scored", "home_avg_conceded",
+                   "away_avg_scored", "away_avg_conceded"]
 csv_initialized = False
 
 async def append_result_to_csv(output_path: str, result: dict) -> None:
     global csv_initialized, known_columns
-
     async with csv_lock:
-        # Tambah kolom bookmaker baru yang belum dikenal
-        for key in result["odds_dict"]:
+        for key in result.get("odds_dict", {}):
             if key not in known_columns:
                 known_columns.append(key)
-
         file_exists = os.path.exists(output_path)
-
         if not csv_initialized or not file_exists:
-            # Tulis ulang header (file baru)
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=known_columns, extrasaction='ignore')
-                writer.writeheader()
+                csv.DictWriter(f, fieldnames=known_columns, extrasaction='ignore').writeheader()
             csv_initialized = True
-
         with open(output_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=known_columns, extrasaction='ignore')
-            row = {"link": result["link"], "match": result["match"]}
-            row.update(result["odds_dict"])
+            row = {"link": result["link"], "match": result["match"],
+                   "home_score": result.get("home_score", ""),
+                   "away_score": result.get("away_score", "")}
+            row.update(result.get("odds_dict", {}))
             writer.writerow(row)
-
         print(f"[CSV] Disimpan: {result['match']}")
 
 # ─────────────────────────────────────────────
@@ -72,36 +53,20 @@ def read_links(csv_path: str) -> list[str]:
     return links
 
 # ─────────────────────────────────────────────
-# Helper: ambil skor (angka digit) dari sibling
-# div di samping container game-host / game-guest
+# Parse H2H → team URLs
 # ─────────────────────────────────────────────
-def extract_score_from_siblings(siblings_texts: list[str]) -> str:
-    """
-    siblings_texts = list teks dari semua sibling div parent game-host/guest.
-    Cari teks yang isdigit() — itu skornya.
-    """
-    for txt in siblings_texts:
-        if txt.isdigit():
-            return txt
-    return ""
-
-# ─────────────────────────────────────────────
-# Parse link head2head team
-# ─────────────────────────────────────────────
-
 def parse_h2h_to_team_urls(h2h_url: str) -> tuple[str, str]:
     pattern = r'oddsportal\.com/(\w+)/h2h/(.+?)-([A-Za-z0-9]+)/(.+?)-([A-Za-z0-9]+)/'
-    match = re.search(pattern, h2h_url)
-    if not match:
+    m = re.search(pattern, h2h_url)
+    if not m:
         return None, None
-    sport = match.group(1)
-    team1, code1 = match.group(2), match.group(3)
-    team2, code2 = match.group(4), match.group(5)
-    base = "https://www.oddsportal.com"
-    return f"{base}/{sport}/team/{team1}/{code1}/", f"{base}/{sport}/team/{team2}/{code2}/"
+    sport = m.group(1)
+    base  = "https://www.oddsportal.com"
+    return (f"{base}/{sport}/team/{m.group(2)}/{m.group(3)}/",
+            f"{base}/{sport}/team/{m.group(4)}/{m.group(5)}/")
 
 # ─────────────────────────────────────────────
-# Helper: klik dengan retry refresh
+# Helper: klik dengan retry
 # ─────────────────────────────────────────────
 async def click_with_retry(page, selector: str, label: str, thread_id: int, max_retry: int = 2) -> bool:
     for attempt in range(1, max_retry + 1):
@@ -112,202 +77,156 @@ async def click_with_retry(page, selector: str, label: str, thread_id: int, max_
             return True
         except PlaywrightTimeout:
             if attempt < max_retry:
-                print(f"[Thread-{thread_id}] {label} tidak ditemukan "
-                      f"(percobaan {attempt}/{max_retry}), refresh...")
+                print(f"[Thread-{thread_id}] {label} timeout, refresh...")
                 await page.reload()
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
             else:
-                print(f"[Thread-{thread_id}] {label} tetap tidak ditemukan "
-                      f"setelah {max_retry}x retry → skip link")
+                print(f"[Thread-{thread_id}] {label} tidak ditemukan → skip")
     return False
 
 # ─────────────────────────────────────────────
-# Scraping per link (jalan di satu Page/tab)
+# Ekstrak skor dari sibling div
+# ─────────────────────────────────────────────
+async def _extract_score(page, testid: str) -> str:
+    score = await page.evaluate("""
+        (testid) => {
+            const el = document.querySelector(`[data-testid="${testid}"]`);
+            if (!el || !el.parentElement) return "";
+            for (const sib of el.parentElement.children) {
+                if (sib === el) continue;
+                const txt = sib.innerText?.trim();
+                if (txt && /^\\d+$/.test(txt)) return txt;
+            }
+            return "";
+        }
+    """, testid)
+    return score or ""
+
+# ─────────────────────────────────────────────
+# Scraping per link
 # ─────────────────────────────────────────────
 async def scrape_link(context, link: str, thread_id: int) -> dict:
     page = await context.new_page()
 
+    async def block_resources(route, request):
+        if request.resource_type in {"image", "media", "font", "stylesheet"}:
+            await route.abort()
+        else:
+            await route.continue_()
+    await page.route("**/*", block_resources)
+
+    def skip(reason):
+        return {"link": link, "match": reason, "home_score": "", "away_score": "", "odds_dict": {}}
+
     try:
         print(f"[Thread-{thread_id}] Membuka: {link}")
         await page.goto(link, wait_until='domcontentloaded', timeout=50_000)
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
-        # # ── Klik more-button ──
-        # if not await click_with_retry(page, "[data-testid='more-button']", "More button", thread_id):
-        #     return {"link": link, "match": "SKIP - more_btn not found", "odds_dict": {}}
+        if not await click_with_retry(page, "text=CS", "Tab CS", thread_id):
+            return skip("SKIP - CS not found")
 
-        # ── Klik tab Correct Score ──
-        if not await click_with_retry(page, "text=CS", "Correct Score button", thread_id):
-            return {"link": link, "match": "SKIP - Correct Score not found", "odds_dict": {}}
-
-        # ── Klik skor 0:0 ──
         try:
             await page.wait_for_selector("p:text-is('0:0')", timeout=NAV_TIMEOUT)
             await page.click("p:text-is('0:0')")
-            print(f"[Thread-{thread_id}] 0:0 diklik")
         except PlaywrightTimeout:
-            print(f"[Thread-{thread_id}] 0:0 tidak ditemukan → skip link")
-            return {"link": link, "match": "SKIP - 0:0 not found", "odds_dict": {}}
+            return skip("SKIP - 0:0 not found")
 
-        # ── Tunggu odds expanded muncul ──
         try:
-            await page.wait_for_selector(
-                "[data-testid='over-under-expanded-row']", timeout=NAV_TIMEOUT
-            )
+            await page.wait_for_selector("[data-testid='over-under-expanded-row']", timeout=NAV_TIMEOUT)
         except PlaywrightTimeout:
-            print(f"[Thread-{thread_id}] Odds tidak muncul → skip link")
-            return {"link": link, "match": "SKIP - odds not found", "odds_dict": {}}
+            return skip("SKIP - odds not found")
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
-        # ── Ambil nama tim ──
-        home_el = page.locator("[data-testid='game-host'] a p").first
-        away_el = page.locator("[data-testid='game-guest'] a p").first
-        home_team  = (await home_el.inner_text()).strip() if await home_el.count() else "N/A"
-        away_team  = (await away_el.inner_text()).strip() if await away_el.count() else "N/A"
+        # ── Nama tim ──
+        home_el   = page.locator("[data-testid='game-host'] a p").first
+        away_el   = page.locator("[data-testid='game-guest'] a p").first
+        home_team = (await home_el.inner_text()).strip() if await home_el.count() else "N/A"
+        away_team = (await away_el.inner_text()).strip() if await away_el.count() else "N/A"
         match_name = f"{home_team} vs {away_team}"
 
-        # ── Ambil score ──
-        host_block  = page.locator("[data-testid='game-host']")
-        guest_block = page.locator("[data-testid='game-guest']")
+        # ── Skor ──
+        home_score = await _extract_score(page, "game-host")
+        away_score = await _extract_score(page, "game-guest")
+        print(f"[Thread-{thread_id}] {match_name} | Skor: {home_score}-{away_score}")
 
-        # Score home = sibling div setelah game-host
-        home_score_el = page.locator("[data-testid='game-host'] + div")
-        # Score away = div pertama dalam parent yang sama, sebelum game-guest
-        away_score_el = guest_block.locator("xpath=preceding-sibling::div[1]")
-
-        home_score = (await home_score_el.inner_text()).strip() if await home_score_el.count() else "N/A"
-        away_score = (await away_score_el.inner_text()).strip() if await away_score_el.count() else "N/A"
-
-        score_dict = {
-            "home_score_result": home_score,
-            "away_score_result": away_score
-        }
-        # ── Scraping odds per bookmaker ──
+        # ── Odds bookmaker ──
         odds_dict = {}
-        rows = page.locator("[data-testid='over-under-expanded-row']")
+        rows  = page.locator("[data-testid='over-under-expanded-row']")
         count = await rows.count()
-
         for i in range(count):
-            row = rows.nth(i)
+            row     = rows.nth(i)
             bm_el   = row.locator("p[data-testid='outrights-expanded-bookmaker-name']").first
             odds_el = row.locator("p.odds-text").first
-
-            bm_count   = await bm_el.count()
-            odds_count = await odds_el.count()
-
-            if bm_count and odds_count:
-                bm  = (await bm_el.inner_text()).strip()
-                odd = (await odds_el.inner_text()).strip()
-                
-                # Skip odds yang di-strikethrough (odds tidak aktif)
+            if await bm_el.count() and await odds_el.count():
                 is_striked = await odds_el.evaluate("el => el.classList.contains('line-through')")
                 if is_striked:
                     continue
-                    
+                bm  = (await bm_el.inner_text()).strip()
+                odd = (await odds_el.inner_text()).strip()
                 odds_dict[bm] = odd
-                
-                print(f"[Thread-{thread_id}]   {bm}: {odd}")
-        
+
+        # ── Team stats (avg scored/conceded) ──
         link_h2h = parse_h2h_to_team_urls(link)
-        # print(link_h2h)
+        home_scored = home_conceded = away_scored = away_conceded = "N/A"
 
-        # ── Home (link pertama) ──
-        print(f"[Thread-{thread_id}] Masuk ke link team home: {link_h2h[0]}")
-        await page.goto(link_h2h[0], wait_until='domcontentloaded', timeout=50_000)
-        try:
-            await page.wait_for_selector("span.text-base.font-bold", timeout=15_000)
-            await asyncio.sleep(2)  # buffer render JS
-            all_spans = page.locator("span.text-base.font-bold")
-            home_scored_text   = (await all_spans.nth(3).inner_text()).strip() if await all_spans.count() > 3 else "N/A"
-            home_conceded_text = (await all_spans.nth(4).inner_text()).strip() if await all_spans.count() > 4 else "N/A"
-        except PlaywrightTimeout:
-            print(f"[Thread-{thread_id}] Home team page timeout")
-            home_scored_text = home_conceded_text = "N/A"
-        print(f"[Thread-{thread_id}] Home - Scored: {home_scored_text}, Conceded: {home_conceded_text}")
+        if link_h2h[0] and link_h2h[1]:
+            for idx, (url, prefix) in enumerate([(link_h2h[0], "home"), (link_h2h[1], "away")]):
+                try:
+                    print(f"[Thread-{thread_id}] Team page {prefix}: {url}")
+                    await page.goto(url, wait_until='domcontentloaded', timeout=50_000)
+                    await page.wait_for_selector("span.text-base.font-bold", timeout=15_000)
+                    await asyncio.sleep(2)
+                    spans = page.locator("span.text-base.font-bold")
+                    sc  = (await spans.nth(3).inner_text()).strip() if await spans.count() > 3 else "N/A"
+                    con = (await spans.nth(4).inner_text()).strip() if await spans.count() > 4 else "N/A"
+                    if prefix == "home":
+                        home_scored, home_conceded = sc, con
+                    else:
+                        away_scored, away_conceded = sc, con
+                except PlaywrightTimeout:
+                    print(f"[Thread-{thread_id}] Team page {prefix} timeout")
 
-        # ── Away (link kedua) ──
-        print(f"[Thread-{thread_id}] Masuk ke link team away: {link_h2h[1]}")
-        await page.goto(link_h2h[1], wait_until='domcontentloaded', timeout=50_000)
-        try:
-            await page.wait_for_selector("span.text-base.font-bold", timeout=15_000)
-            await asyncio.sleep(2)
-            all_spans = page.locator("span.text-base.font-bold")
-            away_scored_text   = (await all_spans.nth(3).inner_text()).strip() if await all_spans.count() > 3 else "N/A"
-            away_conceded_text = (await all_spans.nth(4).inner_text()).strip() if await all_spans.count() > 4 else "N/A"
-        except PlaywrightTimeout:
-            print(f"[Thread-{thread_id}] Away team page timeout")
-            away_scored_text = away_conceded_text = "N/A"
-        print(f"[Thread-{thread_id}] Away - Scored: {away_scored_text}, Conceded: {away_conceded_text}")
+        odds_dict.update({
+            "home_avg_scored":   home_scored,
+            "home_avg_conceded": home_conceded,
+            "away_avg_scored":   away_scored,
+            "away_avg_conceded": away_conceded,
+        })
 
-        # ── Masukkan ke dict ──
-        team_stats = {
-            "home_avg_scored":    home_scored_text,
-            "home_avg_conceded":  home_conceded_text,
-            "away_avg_scored":    away_scored_text,
-            "away_avg_conceded":  away_conceded_text,
-        }
-        odds_dict.update(team_stats)
-        odds_dict.update(score_dict)
-
-        print(f"[Thread-{thread_id}] Total bookmaker: {len(odds_dict)}")
-        return {"link": link, "match": match_name, "odds_dict": odds_dict}
+        print(f"[Thread-{thread_id}] Selesai: {len(odds_dict)} kolom")
+        return {"link": link, "match": match_name,
+                "home_score": home_score, "away_score": away_score,
+                "odds_dict": odds_dict}
 
     except Exception as e:
-        print(f"[Thread-{thread_id}] Error tidak terduga: {e}")
-        return {"link": link, "match": "ERROR", "odds_dict": {}}
+        print(f"[Thread-{thread_id}] Error: {e}")
+        return {"link": link, "match": "ERROR", "home_score": "", "away_score": "", "odds_dict": {}}
     finally:
         await page.close()
 
-
 # ─────────────────────────────────────────────
-# Tulis semua hasil ke CSV
-# ─────────────────────────────────────────────
-def write_all_to_csv(output_path: str, results: list[dict]) -> None:
-    all_bookmakers, seen = [], set()
-    for r in results:
-        for bm in r["odds_dict"]:
-            if bm not in seen:
-                all_bookmakers.append(bm)
-                seen.add(bm)
-
-    header = ["link", "match"] + all_bookmakers
-
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=header, extrasaction='ignore')
-        writer.writeheader()
-        for r in results:
-            row = {"link": r["link"], "match": r["match"]}
-            for bm in all_bookmakers:
-                row[bm] = r["odds_dict"].get(bm, "")
-            writer.writerow(row)
-
-    print(f"\n✓ CSV disimpan: {output_path}")
-    print(f"  {len(results)} match | {len(all_bookmakers)} bookmaker unik")
-
-
-# ─────────────────────────────────────────────
-# Main async
-# Semua tab share 1 browser, tapi pakai Context terpisah
-# agar cookie/session tidak bocor antar link
+# Main
 # ─────────────────────────────────────────────
 async def main():
     links = read_links(INPUT_CSV)
     print(f"Total link: {len(links)}")
-    input("Start? ")
 
     all_results = []
     semaphore   = asyncio.Semaphore(MAX_WORKERS)
 
     async with async_playwright() as pw:
+        # ← Pakai chromium bawaan Playwright, bukan channel="chrome"
         browser = await pw.chromium.launch(
             headless=True,
-            channel="chrome",
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
+                '--single-process',          # penting untuk VPS RAM terbatas
+                '--no-zygote',               # penting untuk VPS
                 '--blink-settings=imagesEnabled=false',
             ]
         )
@@ -319,7 +238,7 @@ async def main():
                     bypass_csp=True,
                     user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
                     viewport={"width": 390, "height": 844},
-                    device_scale_factor=3,
+                    device_scale_factor=2,
                     is_mobile=True,
                     has_touch=True,
                     extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
@@ -336,316 +255,18 @@ async def main():
                 finally:
                     await context.close()
 
-        tasks = [
-            asyncio.create_task(run_one(link, i + 1))
-            for i, link in enumerate(links)
-        ]
+        tasks = [asyncio.create_task(run_one(link, i + 1)) for i, link in enumerate(links)]
 
         try:
             await asyncio.gather(*tasks)
         except (asyncio.CancelledError, KeyboardInterrupt):
-            print("\nDihentikan — membatalkan task yang masih berjalan...")
-            for task in tasks:
-                task.cancel()
-            # tunggu semua task selesai dibatalkan
+            print("\nDihentikan — cancel semua task...")
+            for t in tasks:
+                t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            print(f"\nMenyimpan {len(all_results)} hasil yang sudah selesai...")
+            print(f"\nTotal tersimpan: {len(all_results)}")
             await browser.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nCtrl+C diterima.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import csv
-import asyncio
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
-
-# ─────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────
-INPUT_CSV  = '/home/agoy/Documents/Coding/oddsportal_python/links_copy.csv'
-OUTPUT_CSV = '/home/agoy/Documents/Coding/oddsportal_python/odds_output.csv'
-# INPUT_CSV  = 'links.csv'
-# OUTPUT_CSV = 'odds_output.csv'
-MAX_WORKERS = 10
-NAV_TIMEOUT = 30_000   # ms — sama dengan WebDriverWait(driver, 3) di versi Selenium
-
-
-# ─────────────────────────────────────────────
-# Baca links dari CSV
-# ─────────────────────────────────────────────
-def read_links(csv_path: str) -> list[str]:
-    links = []
-    with open(csv_path, "r", encoding="utf-8", newline="") as f:
-        for row in csv.reader(f):
-            if row and row[0].strip():
-                links.append(row[0].strip())
-    return links
-
-
-# ─────────────────────────────────────────────
-# Helper: ambil skor (angka digit) dari sibling
-# div di samping container game-host / game-guest
-# ─────────────────────────────────────────────
-def extract_score_from_siblings(siblings_texts: list[str]) -> str:
-    """
-    siblings_texts = list teks dari semua sibling div parent game-host/guest.
-    Cari teks yang isdigit() — itu skornya.
-    """
-    for txt in siblings_texts:
-        if txt.isdigit():
-            return txt
-    return ""
-
-
-# ─────────────────────────────────────────────
-# Helper: klik dengan retry refresh
-# ─────────────────────────────────────────────
-async def click_with_retry(
-    page, selector: str, label: str, thread_id: int, max_retry: int = 1
-) -> bool:
-    for attempt in range(1, max_retry + 1):
-        try:
-            await page.wait_for_selector(selector, state="visible", timeout=NAV_TIMEOUT)
-            await page.click(selector)
-            print(f"[Thread-{thread_id}] {label} diklik (percobaan {attempt})")
-            return True
-        except PlaywrightTimeout:
-            if attempt < max_retry:
-                print(
-                    f"[Thread-{thread_id}] {label} tidak ditemukan "
-                    f"(percobaan {attempt}/{max_retry}), refresh..."
-                )
-                await page.reload()
-                await asyncio.sleep(10)
-            else:
-                print(
-                    f"[Thread-{thread_id}] {label} tetap tidak ditemukan "
-                    f"setelah {max_retry}x retry → skip link"
-                )
-    return False
-
-
-# ─────────────────────────────────────────────
-# Scraping per link
-# ─────────────────────────────────────────────
-async def scrape_link(context, link: str, thread_id: int) -> dict:
-    page = await context.new_page()
-    await page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}", lambda r: r.abort())
-
-    def skip(reason: str) -> dict:
-        return {"link": link, "match": reason, "home_score": "", "away_score": "", "odds_dict": {}}
-
-    try:
-        print(f"[Thread-{thread_id}] Membuka: {link}")
-        await page.goto(link, wait_until="domcontentloaded", timeout=30_000)
-        await asyncio.sleep(3)
-
-        # ── More button ──
-        if not await click_with_retry(page, "[data-testid='more-button']", "More button", thread_id):
-            return skip("SKIP - more_btn not found")
-
-        # ── Tab Correct Score ──
-        if not await click_with_retry(page, "text=Correct Score", "Tab Correct Score", thread_id):
-            return skip("SKIP - tab_7 not found")
-
-        # ── Klik 0:0 ──
-        try:
-            await page.wait_for_selector("p:text-is('0:0')", timeout=NAV_TIMEOUT)
-            await page.click("p:text-is('0:0')")
-            print(f"[Thread-{thread_id}] 0:0 diklik")
-        except PlaywrightTimeout:
-            print(f"[Thread-{thread_id}] 0:0 tidak ditemukan → skip link")
-            return skip("SKIP - 0:0 not found")
-
-        # ── Tunggu odds expanded ──
-        try:
-            await page.wait_for_selector(
-                "[data-testid='over-under-expanded-row']", timeout=NAV_TIMEOUT
-            )
-        except PlaywrightTimeout:
-            print(f"[Thread-{thread_id}] Odds tidak muncul → skip link")
-            return skip("SKIP - odds not found")
-
-        await asyncio.sleep(3)
-
-        # ── Nama tim ──
-        home_el = page.locator("[data-testid='game-host'] p").first
-        away_el = page.locator("[data-testid='game-guest'] p").first
-        home_team = (await home_el.inner_text()).strip() if await home_el.count() else "N/A"
-        away_team = (await away_el.inner_text()).strip() if await away_el.count() else "N/A"
-        match_name = f"{home_team} vs {away_team}"
-
-        # ── Skor: cari sibling div yang isinya digit ──
-        # Parent dari game-host/guest biasanya div score wrapper
-        home_score = await _extract_score(page, "game-host")
-        away_score = await _extract_score(page, "game-guest")
-
-        print(f"[Thread-{thread_id}] Match: {match_name}")
-        print(f"[Thread-{thread_id}] Skor: {home_score}-{away_score}")
-
-        # ── Odds per bookmaker ──
-        odds_dict = {}
-        rows  = page.locator("[data-testid='over-under-expanded-row']")
-        count = await rows.count()
-
-        for i in range(count):
-            row      = rows.nth(i)
-            bm_el    = row.locator("[data-testid='outrights-expanded-bookmaker-name']").first
-            odds_el  = row.locator(".odds-text, .odds-link").first   # sesuai versi Selenium: ["a","p"] + class
-
-            if await bm_el.count() and await odds_el.count():
-                bm  = (await bm_el.inner_text()).strip()
-                odd = (await odds_el.inner_text()).strip()
-                odds_dict[bm] = odd
-                print(f"[Thread-{thread_id}] {bm}: {odd}")
-
-        print(f"[Thread-{thread_id}] Total bookmaker: {len(odds_dict)}")
-
-        return {
-            "link": link,
-            "match": match_name,
-            "home_score": home_score,
-            "away_score": away_score,
-            "odds_dict": odds_dict,
-        }
-
-    except Exception as e:
-        print(f"[Thread-{thread_id}] Error tidak terduga: {e}")
-        return {"link": link, "match": "ERROR", "home_score": "", "away_score": "", "odds_dict": {}}
-    finally:
-        await page.close()
-
-
-# ─────────────────────────────────────────────
-# Ekstrak skor dari sibling div parent game-host/guest
-# Replicates extract_score_from_row() di versi Selenium
-# ─────────────────────────────────────────────
-async def _extract_score(page, testid: str) -> str:
-    """
-    Ambil semua teks dari sibling div yang satu parent
-    dengan [data-testid=testid], lalu cari yang isdigit().
-    """
-    # evaluate JS: cari parent → loop children → kumpulkan teks sibling
-    score = await page.evaluate("""
-        (testid) => {
-            const el = document.querySelector(`[data-testid="${testid}"]`);
-            if (!el || !el.parentElement) return "";
-            const siblings = Array.from(el.parentElement.children);
-            for (const sib of siblings) {
-                if (sib === el) continue;
-                const txt = sib.innerText?.trim();
-                if (txt && /^\\d+$/.test(txt)) return txt;
-            }
-            return "";
-        }
-    """, testid)
-    return score or ""
-
-
-# ─────────────────────────────────────────────
-# Tulis semua hasil ke CSV
-# ─────────────────────────────────────────────
-def write_all_to_csv(output_path: str, results: list[dict]) -> None:
-    all_bookmakers, seen = [], set()
-    for r in results:
-        for bm in r.get("odds_dict", {}):
-            if bm not in seen:
-                all_bookmakers.append(bm)
-                seen.add(bm)
-
-    header = ["link", "match", "home_score", "away_score"] + all_bookmakers
-
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
-        writer.writeheader()
-        for r in results:
-            row = {
-                "link":       r.get("link", ""),
-                "match":      r.get("match", ""),
-                "home_score": r.get("home_score", ""),
-                "away_score": r.get("away_score", ""),
-            }
-            for bm in all_bookmakers:
-                row[bm] = r.get("odds_dict", {}).get(bm, "")
-            writer.writerow(row)
-
-    print(f"\n✓ CSV disimpan: {output_path}")
-    print(f"  {len(results)} match | {len(all_bookmakers)} bookmaker unik")
-
-
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
-async def main():
-    links = read_links(INPUT_CSV)
-    print(f"Total link: {len(links)}")
-
-    all_results = []
-    semaphore   = asyncio.Semaphore(MAX_WORKERS)
-
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-        headless=True,
-        channel="chrome",  # pakai Chrome asli, bukan Chromium bawaan Playwright
-        args=[
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--blink-settings=imagesEnabled=false',
-        ]
-    )
-
-        async def run_one(link: str, thread_id: int):
-            async with semaphore:
-                # Context terpisah per link = cookie bersih, mirip incognito tab
-                context = await browser.new_context(
-                java_script_enabled=True,
-                bypass_csp=True,
-                user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-                viewport={"width": 390, "height": 844},
-                device_scale_factor=3,
-                is_mobile=True,
-                has_touch=True,
-                extra_http_headers={
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-)
-                await context.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.define""")
-
-        tasks = [
-            asyncio.create_task(run_one(link, i + 1))
-            for i, link in enumerate(links)
-        ]
-
-        try:
-            await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
-            print("\nDihentikan manual...")
-        finally:
-            await browser.close()
-            write_all_to_csv(OUTPUT_CSV, all_results)
-
 
 if __name__ == "__main__":
     try:
