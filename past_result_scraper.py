@@ -230,9 +230,10 @@ async def main():
                 '--blink-settings=imagesEnabled=false',
             ]
         )
-
-        async def run_one(link: str, thread_id: int):
-            async with semaphore:
+    
+    async def run_one(link: str, thread_id: int):
+        async with semaphore:
+            try:
                 context = await browser.new_context(
                     java_script_enabled=True,
                     bypass_csp=True,
@@ -254,6 +255,8 @@ async def main():
                     print(f"[Selesai] Thread-{thread_id}: {result['match']}")
                 finally:
                     await context.close()
+            except Exception as e:
+                print(f"[Thread-{thread_id}] Context error: {e} → skip link: {link}")
 
         tasks = [asyncio.create_task(run_one(link, i + 1)) for i, link in enumerate(links)]
 
