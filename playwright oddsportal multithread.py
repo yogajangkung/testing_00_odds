@@ -133,6 +133,12 @@ async def scrape_link(context, link: str, thread_id: int) -> dict:
         await page.goto(link, wait_until='domcontentloaded', timeout=50_000)
         await asyncio.sleep(3)
 
+        try:
+            # Gunakan selector yang fleksibel
+            await page.click("button:has-text('I Accept')", timeout=5000)
+        except:
+            pass # Abaikan jika tidak ada
+
         # ── Klik tab Over/Under ──
         if not await click_with_retry(page, "text=Over/Under", "Over/Under button", thread_id):
             return {"link": link, "match": "SKIP - Over/Under not found", "odds_dict": {}}
@@ -362,7 +368,7 @@ def write_all_to_csv(output_path: str, results: list[dict]) -> None:
 async def main():
     links = read_links(INPUT_CSV)
     print(f"Total link: {len(links)}")
-    input("Start? ")
+    # input("Start? ")
 
     all_results = []
     semaphore   = asyncio.Semaphore(MAX_WORKERS)
